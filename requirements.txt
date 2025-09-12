@@ -8,10 +8,10 @@ mysql-connector-python>=8.0.28
 # Ultralytics YOLO
 ultralytics>=8.0.0
 
-# DeepFace
+# DeepFace - mit spezifischen TensorFlow Versionen
 deepface>=0.0.75
+tensorflow>=2.13.0,<2.16.0
 tf-keras>=2.13.0
-tensorflow>=2.13.0
 
 # Gemma/LLaVA (HuggingFace)
 torch>=2.0.0
@@ -19,6 +19,9 @@ torchvision>=0.15.0
 transformers>=4.36.0
 accelerate>=0.21.0
 sentencepiece>=0.1.99
+
+# Für bessere Performance
+protobuf>=3.20.0
 
 # Optional GPU support
 # GPUtil>=1.4.0  # Uncomment for GPU monitoring

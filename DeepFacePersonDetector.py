@@ -31,30 +31,51 @@ class DeepFacePersonDetector(BaseDetector):
             Dictionary mit Erkennungsergebnissen
         """
         try:
-            # Gesichter extrahieren
-            faces = DeepFace.extract_faces(
-                img_path=image_path,
-                detector_backend=self.detector_backend,
-                enforce_detection=False
-            )
+            # Erst versuchen Gesichter zu extrahieren (einfacher Test)
+            faces = []
+            try:
+                faces = DeepFace.extract_faces(
+                    img_path=image_path,
+                    detector_backend=self.detector_backend,
+                    enforce_detection=False,
+                    align=True
+                )
+            except Exception as e:
+                print(f"Warnung: Gesichtsextraktion fehlgeschlagen: {e}")
+                # Fallback zu anderem Backend
+                if self.detector_backend != 'opencv':
+                    try:
+                        faces = DeepFace.extract_faces(
+                            img_path=image_path,
+                            detector_backend='opencv',
+                            enforce_detection=False,
+                            align=True
+                        )
+                    except Exception as e2:
+                        print(f"Auch OpenCV Backend fehlgeschlagen: {e2}")
             
             # Für jedes Gesicht auch die Region ermitteln
             face_objs = []
             confidences = []
             
-            try:
-                # Detaillierte Analyse für Bounding Boxes
-                analysis = DeepFace.analyze(
-                    img_path=image_path,
-                    detector_backend=self.detector_backend,
-                    enforce_detection=False,
-                    actions=['age', 'gender']  # Minimale Analyse für Performance
-                )
-                
-                if isinstance(analysis, list):
+            if faces and len(faces) > 0:
+                try:
+                    # Detaillierte Analyse für Bounding Boxes
+                    analysis = DeepFace.analyze(
+                        img_path=image_path,
+                        detector_backend=self.detector_backend,
+                        enforce_detection=False,
+                        actions=['age'],  # Minimale Analyse für Performance
+                        silent=True
+                    )
+                    
+                    # Behandle sowohl einzelne Ergebnisse als auch Listen
+                    if not isinstance(analysis, list):
+                        analysis = [analysis]
+                    
                     for face_info in analysis:
                         region = face_info.get('region', {})
-                        if region:
+                        if region and all(k in region for k in ['x', 'y', 'w', 'h']):
                             # Konfidenz basierend auf Gesichtsqualität schätzen
                             confidence = self._estimate_face_confidence(faces, region)
                             
@@ -71,49 +92,30 @@ class DeepFacePersonDetector(BaseDetector):
                                     'face_region': region
                                 })
                                 confidences.append(confidence)
-                else:
-                    # Einzelnes Gesicht
-                    region = analysis.get('region', {})
-                    if region:
-                        confidence = self._estimate_face_confidence(faces, region)
-                        if confidence >= self.confidence_threshold:
-                            face_objs.append({
-                                'bbox': [
-                                    region['x'], 
-                                    region['y'], 
-                                    region['x'] + region['w'], 
-                                    region['y'] + region['h']
-                                ],
-                                'confidence': confidence,
-                                'class': 'person',
-                                'face_region': region
-                            })
-                            confidences.append(confidence)
-                            
-            except Exception as e:
-                # Fallback: Nur Anzahl der extrahierten Gesichter
-                print(f"Detaillierte Analyse fehlgeschlagen: {e}")
-                if faces and len(faces) > 0:
-                    # Schätze Konfidenz basierend auf Gesichtsqualität
+                                
+                except Exception as e:
+                    # Fallback: Nur Anzahl der extrahierten Gesichter
+                    print(f"Detaillierte Analyse fehlgeschlagen: {e}")
                     for i, face in enumerate(faces):
-                        confidence = self._estimate_face_confidence_simple(face)
-                        if confidence >= self.confidence_threshold:
-                            face_objs.append({
-                                'bbox': [0, 0, 100, 100],  # Placeholder
-                                'confidence': confidence,
-                                'class': 'person',
-                                'face_index': i
-                            })
-                            confidences.append(confidence)
+                        if face is not None and face.shape[0] > 0 and face.shape[1] > 0:
+                            confidence = self._estimate_face_confidence_simple(face)
+                            if confidence >= self.confidence_threshold:
+                                face_objs.append({
+                                    'bbox': [0, 0, 100, 100],  # Placeholder
+                                    'confidence': confidence,
+                                    'class': 'person',
+                                    'face_index': i
+                                })
+                                confidences.append(confidence)
             
             # Ergebnis zusammenstellen
             return {
                 'persons_detected': len(face_objs),
                 'persons': face_objs,
                 'confidences': confidences,
-                'avg_confidence': np.mean(confidences) if confidences else 0.0,
-                'max_confidence': max(confidences) if confidences else 0.0,
-                'min_confidence': min(confidences) if confidences else 0.0,
+                'avg_confidence': float(np.mean(confidences)) if confidences else 0.0,
+                'max_confidence': float(max(confidences)) if confidences else 0.0,
+                'min_confidence': float(min(confidences)) if confidences else 0.0,
                 'uncertain': any(c < 0.7 for c in confidences) if confidences else len(faces) > 0,
                 'model_output': {
                     'total_faces_extracted': len(faces),
@@ -132,7 +134,7 @@ class DeepFacePersonDetector(BaseDetector):
                 'min_confidence': 0.0,
                 'uncertain': True,
                 'error': str(e),
-                'model_output': {}
+                'model_output': {'error_details': str(e)}
             }
     
     def _estimate_face_confidence(self, faces: List, region: Dict) -> float:
@@ -160,7 +162,11 @@ class DeepFacePersonDetector(BaseDetector):
                 return 0.5
             
             # Prüfe Bildschärfe (einfache Varianz-basierte Methode)
-            gray = cv2.cvtColor((face_array * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            if len(face_array.shape) == 3:
+                gray = cv2.cvtColor((face_array * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+            else:
+                gray = (face_array * 255).astype(np.uint8)
+                
             variance = cv2.Laplacian(gray, cv2.CV_64F).var()
             
             if variance > 500:

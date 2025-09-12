@@ -2,14 +2,13 @@ import time
 import uuid
 from typing import List, Optional, Dict, Any
 import numpy as np
-import BaseDetector
-import DataLoader
-import DatabaseHandler
-import SystemMonitor
+from BaseDetector import BaseDetector
+from DataLoader import DataLoader
+from DatabaseHandler import DatabaseHandler
+from SystemMonitor import SystemMonitor
 
 
 class DetectionProcessor:
-    
     """Hauptklasse für die Verarbeitung mit beliebigen Detektoren"""
     
     def __init__(self, detector: BaseDetector, db_config: Dict[str, str], 
@@ -96,6 +95,8 @@ class DetectionProcessor:
         print(f"\nStarte Verarbeitung von {len(images)} Bildern...")
         print("-" * 80)
         
+        status = 'completed'  # Initialize status
+        
         try:
             for i, (image_path, classification) in enumerate(images, 1):
                 detection_start = time.time()
@@ -163,8 +164,6 @@ class DetectionProcessor:
         except Exception as e:
             print(f"\n❌ Kritischer Fehler: {e}")
             status = 'failed'
-        else:
-            status = 'completed'
         
         # Monitoring stoppen
         self.monitor.stop_monitoring()
@@ -206,12 +205,12 @@ class DetectionProcessor:
                                classification: str, result: Dict[str, Any],
                                processing_time: float):
         """Gibt Erkennungsergebnis auf Konsole aus"""
+        persons = result.get('persons_detected', 0)
+        conf = result.get('avg_confidence', 0.0)
+        uncertain = "⚠" if result.get('uncertain', False) else "✓"
+        
         print(f"[{current:4d}/{total}] {filename} ({classification}) -> "
-              f"{self._format_result_summary(result)}, Zeit: {processing_time:.3f}s")
-    
-    def _format_result_summary(self, result: Dict[str, Any]) -> str:
-        """Formatiert Erkennungsergebnis für Ausgabe"""
-        return str(result)  # Override in spezifischen Implementierungen
+              f"{persons} Personen, Konfidenz: {conf:.3f} {uncertain}, Zeit: {processing_time:.3f}s")
     
     def _print_summary(self, run_id: str, total_images: int, successful: int,
                       failed: int, total_time: float, avg_time: float,
@@ -231,4 +230,3 @@ class DetectionProcessor:
         print(f"  Durchschnittliche RAM-Auslastung: {system_stats['avg_memory']:.1f}%")
         if system_stats['avg_gpu'] > 0:
             print(f"  Durchschnittliche GPU-Auslastung: {system_stats['avg_gpu']:.1f}%")
-
