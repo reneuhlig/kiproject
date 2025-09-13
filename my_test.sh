@@ -82,7 +82,7 @@ test_ollama() {
     log_message "Starte Ollama Test (Gemma 3 Modelle)..."
     
     # Standardmodell klein zum Testen
-    test_model "ollama-gemma3" "--ollama-model gemma3:latest"
+    test_model "ollama-gemma3" "--ollama-model gemma3:4b"
 }
 
 test_database_connection() {
