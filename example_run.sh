@@ -3,8 +3,8 @@
 
 # Datenbankverbindung
 DB_HOST="localhost"
-DB_USER="ai_detection_user"  
-DB_PASSWORD="your_password_here"
+DB_USER="aiuser"  
+DB_PASSWORD="geheimespasswort"
 DB_NAME="ai_detection_db"
 
 # Datenpfad
