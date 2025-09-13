@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hauptscript für die Personenerkennung mit verschiedenen KI-Modellen
-Kann als Cronjob oder manuell ausgeführt werden
+Unterstützt jetzt auch Ollama Gemma 3
 """
 
 import argparse
@@ -13,6 +13,13 @@ from typing import Optional, List
 from UltralyticsPersonDetector import UltralyticsPersonDetector
 from DeepFacePersonDetector import DeepFacePersonDetector
 from GemmaPersonDetector import GemmaPersonDetector
+try:
+    from OllamaGemma3PersonDetector import OllamaGemma3PersonDetector
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("⚠ OllamaGemma3PersonDetector nicht verfügbar - erstelle die Datei zuerst")
+
 from DetectionProcessor import DetectionProcessor
 
 
@@ -21,7 +28,7 @@ def create_detector(model_name: str, **kwargs):
     Factory function für Detector-Erstellung
     
     Args:
-        model_name: Name des Modells ('ultralytics', 'deepface', 'gemma')
+        model_name: Name des Modells ('ultralytics', 'deepface', 'gemma', 'ollama-gemma3')
         **kwargs: Zusätzliche Argumente für den Detector
     """
     if model_name.lower() == 'ultralytics':
@@ -42,8 +49,21 @@ def create_detector(model_name: str, **kwargs):
             confidence_threshold=kwargs.get('confidence_threshold', 0.5)
         )
     
+    elif model_name.lower() == 'ollama-gemma3':
+        if not OLLAMA_AVAILABLE:
+            raise ImportError("OllamaGemma3PersonDetector nicht verfügbar")
+        
+        return OllamaGemma3PersonDetector(
+            model_name=kwargs.get('ollama_model', 'gemma3:4b'),
+            confidence_threshold=kwargs.get('confidence_threshold', 0.5),
+            ollama_host=kwargs.get('ollama_host', 'http://localhost:11434')
+        )
+    
     else:
-        raise ValueError(f"Unbekanntes Modell: {model_name}. Verfügbar: ultralytics, deepface, gemma")
+        available_models = ['ultralytics', 'deepface', 'gemma']
+        if OLLAMA_AVAILABLE:
+            available_models.append('ollama-gemma3')
+        raise ValueError(f"Unbekanntes Modell: {model_name}. Verfügbar: {', '.join(available_models)}")
 
 
 def main():
@@ -53,9 +73,13 @@ def main():
     )
     
     # Modell-Auswahl
+    model_choices = ['ultralytics', 'deepface', 'gemma']
+    if OLLAMA_AVAILABLE:
+        model_choices.append('ollama-gemma3')
+    
     parser.add_argument(
         '--model', 
-        choices=['ultralytics', 'deepface', 'gemma'], 
+        choices=model_choices, 
         required=True,
         help='KI-Modell für die Personenerkennung'
     )
@@ -84,9 +108,17 @@ def main():
                        default='opencv',
                        help='DeepFace Detector Backend')
     
-    # Gemma-spezifisch
+    # Gemma (HuggingFace)-spezifisch
     parser.add_argument('--gemma-model', default='llava-hf/llava-1.5-7b-hf', 
                        help='HuggingFace Modellname für Gemma/LLaVA')
+    
+    # Ollama Gemma3-spezifisch
+    parser.add_argument('--ollama-model', 
+                       choices=['gemma3:270m', 'gemma3:1b', 'gemma3:4b', 'gemma3:12b', 'gemma3:27b'],
+                       default='gemma3:4b',
+                       help='Ollama Gemma 3 Modell')
+    parser.add_argument('--ollama-host', default='http://localhost:11434',
+                       help='Ollama Server URL')
     
     # Run-Konfiguration
     parser.add_argument('--run-name', help='Name für diesen Run (für Tracking)')
@@ -127,6 +159,9 @@ def main():
             detector_kwargs['detector_backend'] = args.deepface_backend
         elif args.model == 'gemma':
             detector_kwargs['hf_model_name'] = args.gemma_model
+        elif args.model == 'ollama-gemma3':
+            detector_kwargs['ollama_model'] = args.ollama_model
+            detector_kwargs['ollama_host'] = args.ollama_host
         
         print(f"Initialisiere {args.model} Detektor...")
         detector = create_detector(args.model, **detector_kwargs)
