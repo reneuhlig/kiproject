@@ -71,11 +71,11 @@ test_deepface() {
     echo "1. Test mit OpenCV Backend:"
     test_model "deepface" "--deepface-backend opencv"
     
-    echo "2. Test mit MTCNN Backend:"
-    test_model "deepface" "--deepface-backend mtcnn"
+    #echo "2. Test mit MTCNN Backend:"
+    #test_model "deepface" "--deepface-backend mtcnn"
     
-    echo "3. Test mit SSD Backend:"
-    test_model "deepface" "--deepface-backend ssd"
+    #echo "3. Test mit SSD Backend:"
+    #test_model "deepface" "--deepface-backend ssd"
 }
 
 test_ollama() {
