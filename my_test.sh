@@ -223,8 +223,8 @@ case "${1:-all}" in
             test_ultralytics
             sleep 5
             test_deepface  
-            sleep 5
-            test_ollama
+            # sleep 5
+            # test_ollama
         else
             log_message "✗ Datenbank-Test fehlgeschlagen - breche ab"
             exit 1

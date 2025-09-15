@@ -1,14 +1,13 @@
 from datetime import datetime
-from typing import  Dict
-
-
+from typing import Dict, Any, Optional, Union
 import mysql.connector
 from mysql.connector import Error
 import json
+import logging
 
 
 class DatabaseHandler:
-    """Handhabt MySQL Datenbankoperationen für alle KI-Modelle"""
+    """Verbesserte MySQL Datenbankoperationen für alle KI-Modelle"""
     
     def __init__(self, host: str, user: str, password: str, database: str):
         self.host = host
@@ -16,6 +15,10 @@ class DatabaseHandler:
         self.password = password
         self.database = database
         self.connection = None
+        
+        # Logging konfigurieren
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
         
     def connect(self) -> bool:
         """Verbindet zur MySQL Datenbank"""
@@ -25,14 +28,16 @@ class DatabaseHandler:
                 user=self.user,
                 password=self.password,
                 database=self.database,
-                autocommit=True
+                autocommit=True,
+                charset='utf8mb4',
+                collation='utf8mb4_unicode_ci'
             )
             print(f"✓ Erfolgreich mit MySQL Datenbank verbunden ({self.host})")
             return True
         except Error as e:
             print(f"✗ Fehler bei Datenbankverbindung: {e}")
             return False
-            
+    
     def create_tables(self) -> bool:
         """Erstellt die benötigten Tabellen falls sie nicht existieren"""
         if not self.connection:
@@ -61,8 +66,11 @@ class DatabaseHandler:
             max_gpu_usage FLOAT,
             status ENUM('running', 'completed', 'failed', 'cancelled') DEFAULT 'running',
             error_message TEXT,
-            config_json TEXT
-        )
+            config_json TEXT,
+            INDEX idx_model_name (model_name),
+            INDEX idx_start_time (start_time),
+            INDEX idx_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
         
         # Tabelle für Erkennungsergebnisse (generisch für alle Modelle)
@@ -76,19 +84,21 @@ class DatabaseHandler:
             model_output JSON,
             confidence_scores TEXT,
             processing_time FLOAT NOT NULL,
-            success BOOLEAN DEFAULT TRUE,
+            success TINYINT(1) DEFAULT 1,
             persons_detected INT DEFAULT 0,
             avg_confidence FLOAT,
             max_confidence FLOAT,
             min_confidence FLOAT,
-            is_uncertain BOOLEAN DEFAULT FALSE,
+            is_uncertain TINYINT(1) DEFAULT 0,
             error_message TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id) REFERENCES ai_runs(run_id),
+            FOREIGN KEY (run_id) REFERENCES ai_runs(run_id) ON DELETE CASCADE,
             INDEX idx_run_id (run_id),
             INDEX idx_classification (classification),
-            INDEX idx_timestamp (timestamp)
-        )
+            INDEX idx_timestamp (timestamp),
+            INDEX idx_persons_detected (persons_detected),
+            INDEX idx_success (success)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
         
         try:
@@ -114,31 +124,65 @@ class DatabaseHandler:
         VALUES (%s, %s, %s, %s, %s)
         """
         
-        config_json = json.dumps(config) if config else None
-        
         try:
-            cursor.execute(query, (run_id, model_name, model_version, 
-                                 datetime.now(), config_json))
+            # Parameter sicher vorbereiten
+            model_version = str(model_version) if model_version else 'unknown'
+            config_json = json.dumps(config, ensure_ascii=False) if config else None
+            start_time = datetime.now()
+            
+            cursor.execute(query, (run_id, model_name, model_version, start_time, config_json))
             return True
         except Error as e:
-            print(f"✗ Fehler beim Einfügen des Runs: {e}")
+            self.logger.error(f"Fehler beim Einfügen des Runs: {e}")
             return False
         finally:
             cursor.close()
 
-    def _convert_to_boolean_int(self, value):
-        """
-        Konvertiert verschiedene Werte zu Integer für MySQL BOOLEAN Spalten
-        MySQL BOOLEAN ist eigentlich TINYINT(1), daher 0 oder 1
-        """
-        if isinstance(value, bool):
-            return int(value)
-        elif isinstance(value, str):
-            return 1 if value.lower() in ('true', '1', 'yes', 'on') else 0
-        elif isinstance(value, (int, float)):
-            return 1 if value else 0
-        else:
+    def _safe_convert_to_int(self, value: Any) -> int:
+        """Sichere Konvertierung zu Integer für MySQL TINYINT(1) - gibt IMMER int zurück"""
+        if value is None:
             return 0
+        if isinstance(value, bool):
+            return 1 if value else 0
+        if isinstance(value, str):
+            # Explizite String-zu-Boolean-Konvertierung
+            lower_val = value.lower().strip()
+            if lower_val in ('true', '1', 'yes', 'on'):
+                return 1
+            elif lower_val in ('false', '0', 'no', 'off', ''):
+                return 0
+            else:
+                # Unbekannter String-Wert - versuche als Zahl zu interpretieren
+                try:
+                    return 1 if float(value) != 0 else 0
+                except (ValueError, TypeError):
+                    return 0
+        if isinstance(value, (int, float)):
+            return 1 if value != 0 else 0
+        # Für alle anderen Typen: Wahrheitswert verwenden
+        return 1 if value else 0
+    
+    def _safe_convert_to_float(self, value: Any) -> Optional[float]:
+        """Sichere Konvertierung zu Float"""
+        if value is None:
+            return None
+        try:
+            result = float(value)
+            # Prüfe auf ungültige Werte
+            if result != result:  # NaN check
+                return None
+            return result
+        except (ValueError, TypeError):
+            return None
+    
+    def _safe_convert_to_int_nullable(self, value: Any) -> Optional[int]:
+        """Sichere Konvertierung zu Integer (nullable)"""
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
             
     def insert_result(self, run_id: str, image_path: str, image_filename: str,
                      classification: str, model_output: Dict, confidence_scores: str,
@@ -159,64 +203,93 @@ class DatabaseHandler:
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
-        model_output_json = json.dumps(model_output) if model_output else None
-        
-        # Initialisiere Standardwerte
-        persons_detected = 0
-        avg_confidence = None
-        max_confidence = None
-        min_confidence = None
-        is_uncertain_int = 0
-        
-        if model_output and isinstance(model_output, dict):
-            # Personen-Anzahl
-            persons_detected = model_output.get('persons_detected', 0)
-            if not isinstance(persons_detected, int):
-                persons_detected = 0
-            
-            # Konfidenz-Werte - sicher konvertieren
-            for conf_key, conf_var in [('avg_confidence', 'avg_confidence'), 
-                                     ('max_confidence', 'max_confidence'), 
-                                     ('min_confidence', 'min_confidence')]:
-                conf_value = model_output.get(conf_key)
-                if conf_value is not None:
-                    try:
-                        conf_value = float(conf_value)
-                        if conf_value > 0:
-                            if conf_key == 'avg_confidence':
-                                avg_confidence = conf_value
-                            elif conf_key == 'max_confidence':
-                                max_confidence = conf_value
-                            elif conf_key == 'min_confidence':
-                                min_confidence = conf_value
-                    except (ValueError, TypeError):
-                        pass  # Bleibt None
-            
-            # Uncertain-Wert sicher konvertieren
-            uncertain_value = model_output.get('uncertain', False)
-            is_uncertain_int = self._convert_to_boolean_int(uncertain_value)
-
-        # Konvertiere success zu Integer für MySQL BOOLEAN
-        success_int = self._convert_to_boolean_int(success)
-
-        print(f""+ query, (
-                run_id, image_path, image_filename, classification,
-                model_output_json, confidence_scores, processing_time,
-                success_int, error_message,
-                persons_detected, avg_confidence, max_confidence, min_confidence, is_uncertain_int
-            ))
-
         try:
-            cursor.execute(query, (
-                run_id, image_path, image_filename, classification,
-                model_output_json, confidence_scores, processing_time,
-                success_int, error_message,
-                persons_detected, avg_confidence, max_confidence, min_confidence, is_uncertain_int
-            ))
+            # Sichere JSON-Serialisierung
+            model_output_json = json.dumps(model_output, ensure_ascii=False) if model_output else None
+            
+            # Sichere Parameter-Extraktion und -Konvertierung
+            persons_detected = 0
+            avg_confidence = None
+            max_confidence = None
+            min_confidence = None
+            is_uncertain_int = 0
+            
+            if model_output and isinstance(model_output, dict):
+                # Personen-Anzahl sicher extrahieren
+                persons_detected = self._safe_convert_to_int_nullable(
+                    model_output.get('persons_detected', 0)
+                ) or 0
+                
+                # Konfidenz-Werte sicher konvertieren
+                avg_confidence = self._safe_convert_to_float(model_output.get('avg_confidence'))
+                max_confidence = self._safe_convert_to_float(model_output.get('max_confidence'))
+                min_confidence = self._safe_convert_to_float(model_output.get('min_confidence'))
+                
+                # Uncertain-Wert sicher konvertieren - KRITISCHER FIX!
+                uncertain_raw = model_output.get('uncertain', False)
+                is_uncertain_int = self._safe_convert_to_int(uncertain_raw)
+            
+            # Success-Wert sicher konvertieren - KRITISCHER FIX!
+            success_int = self._safe_convert_to_int(success)
+            
+            # Processing time sicher konvertieren
+            processing_time_safe = self._safe_convert_to_float(processing_time) or 0.0
+            
+            # KRITISCHER FIX: Nochmalige Validierung der Boolean-Werte
+            # Falls MySQL trotzdem Strings erhält, forcieren wir Integer
+            if not isinstance(success_int, int):
+                success_int = 1 if str(success_int).lower() == 'true' else 0
+            if not isinstance(is_uncertain_int, int):
+                is_uncertain_int = 1 if str(is_uncertain_int).lower() == 'true' else 0
+            
+            # Parameter-Array explizit aufbauen - keine implizite Konvertierung!
+            params = [
+                str(run_id),                                     # str
+                str(image_path),                                 # str
+                str(image_filename),                             # str
+                str(classification) if classification else '',   # str
+                model_output_json,                               # str or None
+                str(confidence_scores) if confidence_scores else '', # str
+                float(processing_time_safe),                     # float (explizit)
+                int(success_int),                                # int (explizit)
+                str(error_message) if error_message else None,   # str or None
+                int(persons_detected),                           # int (explizit)
+                float(avg_confidence) if avg_confidence is not None else None,  # float or None
+                float(max_confidence) if max_confidence is not None else None,  # float or None
+                float(min_confidence) if min_confidence is not None else None,  # float or None
+                int(is_uncertain_int)                            # int (explizit)
+            ]
+            
+            # Debug vor dem Execute (nur die kritischen Werte)
+            self.logger.debug(f"Final params - success: {params[7]} (type: {type(params[7])}), "
+                            f"is_uncertain: {params[13]} (type: {type(params[13])})")
+            
+            cursor.execute(query, params)
             return True
+            
         except Error as e:
-            print(f"✗ Fehler beim Einfügen des Ergebnisses: {e}")
-            print(f"   Daten: persons={persons_detected}, avg_conf={avg_confidence}, max_conf={max_confidence}, min_conf={min_confidence}, uncertain={is_uncertain_int}")
+            # Noch detaillierteres Debug
+            debug_params = {
+                'persons_detected': (persons_detected, type(persons_detected)),
+                'avg_confidence': (avg_confidence, type(avg_confidence)),
+                'max_confidence': (max_confidence, type(max_confidence)),
+                'min_confidence': (min_confidence, type(min_confidence)),
+                'is_uncertain_raw': (model_output.get('uncertain') if model_output else None,),
+                'is_uncertain_converted': (is_uncertain_int, type(is_uncertain_int)),
+                'success_raw': (success,),
+                'success_converted': (success_int, type(success_int)),
+                'processing_time': (processing_time_safe, type(processing_time_safe))
+            }
+            self.logger.error(f"Fehler beim Einfügen des Ergebnisses: {e}")
+            self.logger.error(f"Detaillierte Debug-Parameter: {debug_params}")
+            
+            # Zusätzlich: MySQL Connector Version prüfen
+            import mysql.connector
+            self.logger.error(f"MySQL Connector Version: {mysql.connector.__version__}")
+            
+            return False
+        except Exception as e:
+            self.logger.error(f"Unerwarteter Fehler beim Einfügen des Ergebnisses: {e}")
             return False
         finally:
             cursor.close()
@@ -251,26 +324,43 @@ class DatabaseHandler:
         """
         
         try:
+            # Parameter sicher konvertieren
+            end_time = datetime.now()
+            total_images = self._safe_convert_to_int_nullable(total_images) or 0
+            successful_detections = self._safe_convert_to_int_nullable(successful_detections) or 0
+            failed_detections = self._safe_convert_to_int_nullable(failed_detections) or 0
+            
+            avg_processing_time = self._safe_convert_to_float(avg_processing_time)
+            total_processing_time = self._safe_convert_to_float(total_processing_time)
+            
+            # System-Stats sicher extrahieren
+            avg_cpu = self._safe_convert_to_float(system_stats.get('avg_cpu'))
+            max_cpu = self._safe_convert_to_float(system_stats.get('max_cpu'))
+            avg_memory = self._safe_convert_to_float(system_stats.get('avg_memory'))
+            max_memory = self._safe_convert_to_float(system_stats.get('max_memory'))
+            avg_gpu = self._safe_convert_to_float(system_stats.get('avg_gpu'))
+            max_gpu = self._safe_convert_to_float(system_stats.get('max_gpu'))
+            
             cursor.execute(query, (
-                datetime.now(),
+                end_time,
                 total_images,
                 successful_detections,
                 failed_detections,
                 avg_processing_time,
                 total_processing_time,
-                system_stats['avg_cpu'],
-                system_stats['max_cpu'],
-                system_stats['avg_memory'],
-                system_stats['max_memory'],
-                system_stats['avg_gpu'],
-                system_stats['max_gpu'],
-                status,
-                error_message,
+                avg_cpu,
+                max_cpu,
+                avg_memory,
+                max_memory,
+                avg_gpu,
+                max_gpu,
+                str(status),
+                str(error_message) if error_message else None,
                 run_id
             ))
             return True
         except Error as e:
-            print(f"✗ Fehler beim Aktualisieren des Runs: {e}")
+            self.logger.error(f"Fehler beim Aktualisieren des Runs: {e}")
             return False
         finally:
             cursor.close()
@@ -278,7 +368,6 @@ class DatabaseHandler:
     def fix_existing_table(self) -> bool:
         """
         Fügt fehlende Spalten zu bestehender Tabelle hinzu
-        Aufruf falls Tabelle bereits existiert aber Spalten fehlen
         """
         if not self.connection:
             return False
@@ -302,7 +391,7 @@ class DatabaseHandler:
                 'avg_confidence': 'FLOAT',
                 'max_confidence': 'FLOAT', 
                 'min_confidence': 'FLOAT',
-                'is_uncertain': 'BOOLEAN DEFAULT FALSE'
+                'is_uncertain': 'TINYINT(1) DEFAULT 0'
             }
             
             # Füge fehlende Spalten hinzu
@@ -320,6 +409,45 @@ class DatabaseHandler:
         except Error as e:
             print(f"✗ Fehler beim Korrigieren der Tabelle: {e}")
             return False
+        finally:
+            cursor.close()
+    
+    def get_run_statistics(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Gibt Statistiken für einen bestimmten Run zurück
+        
+        Args:
+            run_id: Run-ID
+            
+        Returns:
+            Dictionary mit Statistiken oder None bei Fehler
+        """
+        if not self.connection:
+            return None
+            
+        cursor = self.connection.cursor(dictionary=True)
+        
+        try:
+            query = """
+            SELECT 
+                r.*,
+                COUNT(dr.id) as result_count,
+                AVG(dr.persons_detected) as avg_persons_per_image,
+                SUM(dr.persons_detected) as total_persons_found,
+                COUNT(CASE WHEN dr.is_uncertain = 1 THEN 1 END) as uncertain_count
+            FROM ai_runs r
+            LEFT JOIN detection_results dr ON r.run_id = dr.run_id
+            WHERE r.run_id = %s
+            GROUP BY r.run_id
+            """
+            
+            cursor.execute(query, (run_id,))
+            result = cursor.fetchone()
+            
+            return result
+        except Error as e:
+            self.logger.error(f"Fehler beim Abrufen der Run-Statistiken: {e}")
+            return None
         finally:
             cursor.close()
             
