@@ -66,7 +66,6 @@ class DatabaseHandler:
         """
         
         # Tabelle für Erkennungsergebnisse (generisch für alle Modelle)
-        # KORREKTUR: is_uncertain als BOOLEAN hinzugefügt
         create_results_table = """
         CREATE TABLE IF NOT EXISTS detection_results (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -78,6 +77,10 @@ class DatabaseHandler:
             confidence_scores TEXT,
             processing_time FLOAT NOT NULL,
             success BOOLEAN DEFAULT TRUE,
+            persons_detected INT DEFAULT 0,
+            avg_confidence FLOAT,
+            max_confidence FLOAT,
+            min_confidence FLOAT,
             is_uncertain BOOLEAN DEFAULT FALSE,
             error_message TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -122,6 +125,20 @@ class DatabaseHandler:
             return False
         finally:
             cursor.close()
+
+    def _convert_to_boolean_int(self, value):
+        """
+        Konvertiert verschiedene Werte zu Integer für MySQL BOOLEAN Spalten
+        MySQL BOOLEAN ist eigentlich TINYINT(1), daher 0 oder 1
+        """
+        if isinstance(value, bool):
+            return int(value)
+        elif isinstance(value, str):
+            return 1 if value.lower() in ('true', '1', 'yes', 'on') else 0
+        elif isinstance(value, (int, float)):
+            return 1 if value else 0
+        else:
+            return 0
             
     def insert_result(self, run_id: str, image_path: str, image_filename: str,
                      classification: str, model_output: Dict, confidence_scores: str,
@@ -129,8 +146,6 @@ class DatabaseHandler:
                      error_message: str = None) -> bool:
         """
         Fügt ein Erkennungsergebnis in die Datenbank ein
-        
-        KORREKTUR: Angepasst an bestehende Tabellenstruktur mit allen Spalten
         """
         if not self.connection:
             return False
@@ -146,12 +161,12 @@ class DatabaseHandler:
         
         model_output_json = json.dumps(model_output) if model_output else None
         
-        # Extrahiere Werte aus model_output
+        # Initialisiere Standardwerte
         persons_detected = 0
         avg_confidence = None
         max_confidence = None
         min_confidence = None
-        is_uncertain = False
+        is_uncertain_int = 0
         
         if model_output and isinstance(model_output, dict):
             # Personen-Anzahl
@@ -159,57 +174,49 @@ class DatabaseHandler:
             if not isinstance(persons_detected, int):
                 persons_detected = 0
             
-            # Konfidenz-Werte
-            avg_confidence = model_output.get('avg_confidence', None)
-            max_confidence = model_output.get('max_confidence', None)
-            min_confidence = model_output.get('min_confidence', None)
-            
-            # Konvertiere zu Float oder None
-            for conf_name, conf_value in [('avg', avg_confidence), ('max', max_confidence), ('min', min_confidence)]:
+            # Konfidenz-Werte - sicher konvertieren
+            for conf_key, conf_var in [('avg_confidence', 'avg_confidence'), 
+                                     ('max_confidence', 'max_confidence'), 
+                                     ('min_confidence', 'min_confidence')]:
+                conf_value = model_output.get(conf_key)
                 if conf_value is not None:
                     try:
-                        if conf_name == 'avg':
-                            avg_confidence = float(conf_value) if conf_value > 0 else None
-                        elif conf_name == 'max':
-                            max_confidence = float(conf_value) if conf_value > 0 else None
-                        elif conf_name == 'min':
-                            min_confidence = float(conf_value) if conf_value > 0 else None
+                        conf_value = float(conf_value)
+                        if conf_value > 0:
+                            if conf_key == 'avg_confidence':
+                                avg_confidence = conf_value
+                            elif conf_key == 'max_confidence':
+                                max_confidence = conf_value
+                            elif conf_key == 'min_confidence':
+                                min_confidence = conf_value
                     except (ValueError, TypeError):
-                        if conf_name == 'avg':
-                            avg_confidence = None
-                        elif conf_name == 'max':
-                            max_confidence = None
-                        elif conf_name == 'min':
-                            min_confidence = None
+                        pass  # Bleibt None
+            
+            # Uncertain-Wert sicher konvertieren
+            uncertain_value = model_output.get('uncertain', False)
+            is_uncertain_int = self._convert_to_boolean_int(uncertain_value)
 
-                            
-            is_uncertain_db = 0
+        # Konvertiere success zu Integer für MySQL BOOLEAN
+        success_int = self._convert_to_boolean_int(success)
 
-            if model_output and isinstance(model_output, dict):
-                persons_detected = model_output.get('persons_detected', 0)            
-                def uncertain_to_int(value):
-                    if isinstance(value, bool):
-                        return int(value)
-                    elif isinstance(value, str):
-                        return 1 if value.lower() in ('true', '1', 'yes', 'on') else 0
-                    elif isinstance(value, (int, float)):
-                        return 1 if value else 0
-                    else:
-                        return 0
-
-                is_uncertain_db = uncertain_to_int(model_output.get('uncertain', False))
+        print(f""+ query, (
+                run_id, image_path, image_filename, classification,
+                model_output_json, confidence_scores, processing_time,
+                success_int, error_message,
+                persons_detected, avg_confidence, max_confidence, min_confidence, is_uncertain_int
+            ))
 
         try:
             cursor.execute(query, (
                 run_id, image_path, image_filename, classification,
                 model_output_json, confidence_scores, processing_time,
-                success, error_message,
-                persons_detected, avg_confidence, max_confidence, min_confidence, is_uncertain_db
+                success_int, error_message,
+                persons_detected, avg_confidence, max_confidence, min_confidence, is_uncertain_int
             ))
             return True
         except Error as e:
             print(f"✗ Fehler beim Einfügen des Ergebnisses: {e}")
-            print(f"   Daten: persons={persons_detected}, avg_conf={avg_confidence}, max_conf={max_confidence}, min_conf={min_confidence}, uncertain={is_uncertain_db}")
+            print(f"   Daten: persons={persons_detected}, avg_conf={avg_confidence}, max_conf={max_confidence}, min_conf={min_confidence}, uncertain={is_uncertain_int}")
             return False
         finally:
             cursor.close()
@@ -270,8 +277,8 @@ class DatabaseHandler:
     
     def fix_existing_table(self) -> bool:
         """
-        Fügt fehlende Spalte zu bestehender Tabelle hinzu
-        Aufruf falls Tabelle bereits existiert aber Spalte fehlt
+        Fügt fehlende Spalten zu bestehender Tabelle hinzu
+        Aufruf falls Tabelle bereits existiert aber Spalten fehlen
         """
         if not self.connection:
             return False
@@ -279,24 +286,35 @@ class DatabaseHandler:
         cursor = self.connection.cursor()
         
         try:
-            # Prüfe ob Spalte bereits existiert
+            # Prüfe welche Spalten fehlen
             cursor.execute("""
                 SELECT COLUMN_NAME 
                 FROM INFORMATION_SCHEMA.COLUMNS 
                 WHERE TABLE_SCHEMA = %s 
-                AND TABLE_NAME = 'detection_results' 
-                AND COLUMN_NAME = 'is_uncertain'
+                AND TABLE_NAME = 'detection_results'
             """, (self.database,))
             
-            if not cursor.fetchone():
-                # Spalte existiert nicht - füge sie hinzu
-                cursor.execute("""
-                    ALTER TABLE detection_results 
-                    ADD COLUMN is_uncertain BOOLEAN DEFAULT FALSE
-                """)
-                print("✓ Spalte 'is_uncertain' hinzugefügt")
-            else:
-                print("✓ Spalte 'is_uncertain' bereits vorhanden")
+            existing_columns = {row[0] for row in cursor.fetchall()}
+            
+            # Liste der benötigten Spalten mit ihren Definitionen
+            required_columns = {
+                'persons_detected': 'INT DEFAULT 0',
+                'avg_confidence': 'FLOAT',
+                'max_confidence': 'FLOAT', 
+                'min_confidence': 'FLOAT',
+                'is_uncertain': 'BOOLEAN DEFAULT FALSE'
+            }
+            
+            # Füge fehlende Spalten hinzu
+            for column_name, column_def in required_columns.items():
+                if column_name not in existing_columns:
+                    cursor.execute(f"""
+                        ALTER TABLE detection_results 
+                        ADD COLUMN {column_name} {column_def}
+                    """)
+                    print(f"✓ Spalte '{column_name}' hinzugefügt")
+                else:
+                    print(f"✓ Spalte '{column_name}' bereits vorhanden")
                 
             return True
         except Error as e:
