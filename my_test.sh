@@ -15,7 +15,7 @@ DB_NAME="ai_detection"
 DATA_DIR="/blob"
 
 # Test-Parameter
-TEST_MAX_IMAGES=5  # Kleine Anzahl für Tests
+TEST_MAX_IMAGES=500000  # Kleine Anzahl für Tests
 CONFIDENCE_THRESHOLD=0.5
 
 # =============================================================================
